@@ -1,0 +1,69 @@
+services:
+  certbot-nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ckb_certbot_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx-certbot.conf.template:/etc/nginx/nginx-http.conf.template
+      - ./webroot:/var/www/html
+    environment:
+      - DOMAIN=${DOMAIN}
+    restart: unless-stopped
+    command: >
+      /bin/sh -c "
+      gomplate -f /etc/nginx/nginx-http.conf.template -o /usr/local/nginx/conf/nginx.conf && 
+      /usr/local/nginx/sbin/nginx -g 'daemon off;'
+      "
+
+  certbot:
+    image: certbot/certbot:v4.0.0
+    container_name: ckb_certbot
+    volumes:
+      - ./certs:/etc/letsencrypt
+      - ./webroot:/var/www/html
+    environment:
+      - DOMAIN=${DOMAIN}
+      - EMAIL=${EMAIL}
+    depends_on:
+      - certbot-nginx
+    entrypoint: >
+      /bin/sh -c "
+      trap exit TERM; 
+      certbot certonly --webroot --webroot-path=/var/www/html 
+      ${EMAIL:+--email $EMAIL} 
+      --agree-tos --no-eff-email 
+      --non-interactive 
+      -d $DOMAIN; 
+      while :; do certbot renew --non-interactive; sleep 24h & wait $${!}; done
+      "
+    restart: unless-stopped
+
+  ckb-network-nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ckb_network_tls_proxy
+    ports:
+      - "${HTTPS_PORT}:443"
+    volumes:
+      - ./nginx-ckb.conf.template:/etc/nginx/nginx-ckb.conf.template
+      - ./certs:/etc/nginx/ssl
+    environment:
+      - DOMAIN=${DOMAIN}
+      - CKB_NETWORK_ADDRESS=${CKB_NETWORK_ADDRESS}
+    depends_on:
+      - certbot
+    restart: unless-stopped
+    command: >
+        /bin/sh -c "
+        until [ -f /etc/nginx/ssl/live/$DOMAIN/fullchain.pem ]; do sleep 5; echo 'Certificate not found, waiting...'; done &&
+        gomplate -f /etc/nginx/nginx-ckb.conf.template -o /usr/local/nginx/conf/nginx.conf &&
+        /usr/local/nginx/sbin/nginx -g 'daemon off;' & nginx_pid=\$! &&
+        while :; do sleep 24h; echo 'Reloading Nginx...'; /usr/local/nginx/sbin/nginx -s reload && echo 'Reload successful' || echo 'Reload failed'; done
+        "      
+volumes:
+  certs:
+  webroot:
